@@ -170,8 +170,11 @@ class MatterEnrollerPanel extends HTMLElement {
       <div class="card">
         <div class="row" id="actions">
           <button class="big" id="scan-btn">📷 Enroll Thread Device</button>
+          <button class="secondary" id="photo-btn">📸 Scan QR from photo</button>
           <button class="secondary" id="manual-btn">⌨️ Enter pairing code</button>
         </div>
+        <input type="file" id="photo-input" accept="image/*" capture="environment" class="hidden" />
+        <p class="muted" id="photo-hint" style="margin-top:8px;">On the mobile app or over HTTP, live camera is blocked by the browser — use <strong>Scan QR from photo</strong> (opens your phone camera) or type the code.</p>
 
         <div id="scanner" class="hidden" style="margin-top:12px;">
           <video id="video" playsinline muted></video>
@@ -220,6 +223,11 @@ class MatterEnrollerPanel extends HTMLElement {
 
     this._$("scan-btn").addEventListener("click", () => this._startScanner());
     this._$("stop-btn").addEventListener("click", () => this._stopScanner());
+    this._$("photo-btn").addEventListener("click", () => this._pickPhoto());
+    this._$("photo-input").addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      this._scanFromPhoto(file);
+    });
     this._$("manual-btn").addEventListener("click", () => this._toggleManual());
     this._$("manual-submit").addEventListener("click", () =>
       this._handleManual()
@@ -246,8 +254,11 @@ class MatterEnrollerPanel extends HTMLElement {
     const hint = this._$("scan-hint");
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      hint.textContent =
-        "Camera unavailable. HTTPS (or localhost) is required for camera access — use “Enter pairing code” instead.";
+      this._$("scanner").classList.add("hidden");
+      this._showError(
+        "Live camera needs HTTPS (or localhost) — your HA is served over HTTP, so the browser blocks it. " +
+          "Use “📸 Scan QR from photo” (opens your phone/computer camera) or “⌨️ Enter pairing code”."
+      );
       return;
     }
 
@@ -257,7 +268,10 @@ class MatterEnrollerPanel extends HTMLElement {
         audio: false,
       });
     } catch (err) {
-      hint.textContent = `Could not open camera: ${err.message}. Use “Enter pairing code” instead.`;
+      this._$("scanner").classList.add("hidden");
+      this._showError(
+        `Could not open camera: ${err.message}. Use “📸 Scan QR from photo” or “⌨️ Enter pairing code”.`
+      );
       return;
     }
 
@@ -334,6 +348,73 @@ class MatterEnrollerPanel extends HTMLElement {
     const video = this._$("video");
     if (video) video.srcObject = null;
     this._$("scanner").classList.add("hidden");
+  }
+
+  // ---- photo scan (works over HTTP / in the mobile app) --------------------
+  // Uses <input type="file" capture> so the native camera app takes a still
+  // photo, which we decode with jsQR — no getUserMedia / HTTPS required.
+
+  _pickPhoto() {
+    this._stopScanner();
+    this._$("manual").classList.add("hidden");
+    const input = this._$("photo-input");
+    input.value = "";
+    input.click();
+  }
+
+  async _scanFromPhoto(file) {
+    if (!file) return;
+    this._resetResult();
+
+    try {
+      await loadJsQR();
+    } catch (err) {
+      this._showError(err.message);
+      return;
+    }
+
+    try {
+      const image = await this._loadImage(file);
+      const canvas = this._$("canvas");
+      const maxDim = 1600;
+      const scale = Math.min(1, maxDim / Math.max(image.width, image.height));
+      const width = Math.max(1, Math.round(image.width * scale));
+      const height = Math.max(1, Math.round(image.height * scale));
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(image, 0, 0, width, height);
+      const img = ctx.getImageData(0, 0, width, height);
+      const result = window.jsQR(img.data, img.width, img.height);
+
+      if (result && result.data && result.data.toUpperCase().includes("MT:")) {
+        this._acceptScanned(result.data);
+      } else if (result && result.data) {
+        this._showError("That QR code isn't a Matter code (no MT: payload).");
+      } else {
+        this._showError(
+          "No QR code found in the photo. Try again — get closer, fill the frame, and keep it well-lit and in focus."
+        );
+      }
+    } catch (err) {
+      this._showError(`Could not read the photo: ${err.message}`);
+    }
+  }
+
+  _loadImage(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const image = new Image();
+      image.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(image);
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("unsupported image file"));
+      };
+      image.src = url;
+    });
   }
 
   // ---- code handling -------------------------------------------------------

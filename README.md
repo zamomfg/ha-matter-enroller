@@ -14,8 +14,12 @@ but packaged as a one-click, HACS-installable integration.
 
 ## Features
 
-- 📷 **Camera QR scanning** — uses the native `BarcodeDetector` API where
-  available, with a bundled [`jsQR`](https://github.com/cozmo/jsQR) fallback.
+- 📷 **Camera QR scanning** — live scanning via the native `BarcodeDetector` API
+  where available, with a bundled [`jsQR`](https://github.com/cozmo/jsQR)
+  fallback.
+- 📸 **Photo scanning (mobile app / HTTP)** — a "Scan QR from photo" option that
+  opens the phone's native camera (or a file picker on desktop) and decodes the
+  still image. Works even over plain HTTP where live camera is blocked.
 - ⌨️ **Manual entry** — paste the full `MT:…` QR string or the 11 / 21-digit
   manual pairing code.
 - 🔎 **Decodes the payload** — shows Vendor ID, Product ID, discriminator,
@@ -39,10 +43,18 @@ but packaged as a one-click, HACS-installable integration.
   dataset, and **Bluetooth** available to Home Assistant (built-in adapter or an
   ESP32 Bluetooth proxy in *active* mode) so the device can be commissioned over
   BLE.
-- **Camera access requires a secure context.** Browsers only expose the camera
-  over **HTTPS** or on **`localhost`**. If you open Home Assistant over plain
-  `http://` on your LAN, use the *Enter pairing code* option instead (or set up
-  HTTPS / Nabu Casa).
+- **Live camera requires a secure context.** Browsers (and the HA mobile app's
+  WebView) only expose the live camera (`getUserMedia`) over **HTTPS** or
+  **`localhost`**. Over plain `http://` — including the mobile app on your LAN —
+  live scanning is blocked by the browser and there is nothing the integration
+  can do about it. In that case use either:
+  - **📸 Scan QR from photo** — opens your phone's native camera (or a file
+    picker on desktop); the still photo is decoded locally. This works over HTTP
+    and in the mobile app.
+  - **⌨️ Enter pairing code** — type the `MT:` string or manual code.
+
+  For live scanning everywhere, serve HA over HTTPS (Nabu Casa Cloud or a
+  reverse proxy with a valid certificate).
 
 ## Installation
 
