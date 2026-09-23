@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Matter Enroller",
+        "description": "Add the Matter Enroller panel to the sidebar. This lets you commission Matter/Thread devices by scanning their QR code with your browser camera or typing the pairing code. Requires the Matter integration and Matter Server to be set up."
+      }
+    },
+    "abort": {
+      "already_configured": "Matter Enroller is already set up."
+    }
+  }
+}
