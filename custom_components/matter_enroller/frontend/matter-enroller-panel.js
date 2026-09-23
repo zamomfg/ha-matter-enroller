@@ -66,6 +66,8 @@ class MatterEnrollerPanel extends HTMLElement {
 
   disconnectedCallback() {
     this._stopScanner();
+    // Restore the app's command handler if a native scan was mid-flight.
+    if (this._prevCmdHandler !== undefined) this._restoreCmdHandler();
     if (this._logUnsub) {
       this._logUnsub.then((unsub) => unsub && unsub()).catch(() => {});
       this._logUnsub = null;
@@ -174,8 +176,7 @@ class MatterEnrollerPanel extends HTMLElement {
           <button class="secondary" id="manual-btn">⌨️ Enter pairing code</button>
         </div>
         <input type="file" id="photo-input" accept="image/*" capture="environment" class="hidden" />
-        <p class="muted" id="photo-hint" style="margin-top:8px;">Over HTTP (incl. the mobile app), live camera is blocked by the browser — use <strong>📸 Scan QR from photo</strong> or type the code.<br />
-        <strong>Home Assistant Android app:</strong> it can only open the photo gallery, not the camera (app limitation). Snap the QR with your Camera app first, then pick it — or open this page in <strong>Chrome</strong>, where the button opens the camera directly (works over HTTP too).</p>
+        <p class="muted" id="photo-hint" style="margin-top:8px;">In the <strong>Home Assistant mobile app</strong>, <strong>Enroll Thread Device</strong> opens the app's built-in camera scanner. In a browser it uses the live camera (needs HTTPS/localhost) — otherwise use <strong>📸 Scan QR from photo</strong> or type the code.</p>
 
         <div id="scanner" class="hidden" style="margin-top:12px;">
           <video id="video" playsinline muted></video>
@@ -200,6 +201,7 @@ class MatterEnrollerPanel extends HTMLElement {
           <dl class="fields" id="result-fields"></dl>
           <div class="row" style="margin-top:12px;">
             <button id="commission-btn">🚀 Commission Thread device</button>
+            <button class="secondary hidden" id="cancel-btn">✋ Cancel</button>
             <button class="secondary" id="reset-btn">Clear</button>
           </div>
           <div class="status" id="status"></div>
@@ -222,7 +224,7 @@ class MatterEnrollerPanel extends HTMLElement {
 
     this._$ = (id) => this.shadowRoot.getElementById(id);
 
-    this._$("scan-btn").addEventListener("click", () => this._startScanner());
+    this._$("scan-btn").addEventListener("click", () => this._startEnroll());
     this._$("stop-btn").addEventListener("click", () => this._stopScanner());
     this._$("photo-btn").addEventListener("click", () => this._pickPhoto());
     this._$("photo-input").addEventListener("change", (e) => {
@@ -239,11 +241,103 @@ class MatterEnrollerPanel extends HTMLElement {
     this._$("commission-btn").addEventListener("click", () =>
       this._commission()
     );
+    this._$("cancel-btn").addEventListener("click", () =>
+      this._cancelCommission()
+    );
     this._$("reset-btn").addEventListener("click", () => this._resetResult());
     this._$("clear-logs").addEventListener("click", () => {
       this._logLines = [];
       this._$("logs").textContent = "";
     });
+  }
+
+  // ---- enroll entry point --------------------------------------------------
+
+  _startEnroll() {
+    this._resetResult();
+    // In the Home Assistant companion app, use the app's native barcode
+    // scanner (real camera, works over HTTP). Otherwise use the browser
+    // camera (needs HTTPS/localhost).
+    if (this._hasNativeScanner()) {
+      this._startNativeScan();
+    } else {
+      this._startScanner();
+    }
+  }
+
+  // ---- native scanner (Home Assistant mobile app) --------------------------
+
+  _external() {
+    return (
+      this._hass && this._hass.auth && this._hass.auth.external
+        ? this._hass.auth.external
+        : null
+    );
+  }
+
+  _hasNativeScanner() {
+    const ext = this._external();
+    return !!(ext && ext.config && ext.config.hasBarCodeScanner);
+  }
+
+  _startNativeScan() {
+    const ext = this._external();
+    if (!ext) return;
+
+    // Chain onto the frontend's own command handler so we don't clobber it.
+    this._prevCmdHandler = ext._commandHandler;
+    const handler = (msg) => {
+      if (msg && msg.type === "command" && msg.command === "bar_code/scan_result") {
+        const payload = msg.payload || {};
+        if (payload.format !== "qr_code") {
+          ext.fireMessage({
+            type: "bar_code/notify",
+            payload: { message: "That's not a QR code — scan the Matter QR." },
+          });
+        } else if ((payload.rawValue || "").toUpperCase().includes("MT:")) {
+          this._closeNativeScan();
+          this._acceptScanned(payload.rawValue);
+        } else {
+          ext.fireMessage({
+            type: "bar_code/notify",
+            payload: { message: "Not a Matter QR code (missing MT:)." },
+          });
+        }
+        return true;
+      }
+      if (msg && msg.type === "command" && msg.command === "bar_code/aborted") {
+        this._restoreCmdHandler();
+        if ((msg.payload || {}).reason === "alternative_options") {
+          this._$("manual").classList.remove("hidden");
+        }
+        return true;
+      }
+      return this._prevCmdHandler ? this._prevCmdHandler(msg) : false;
+    };
+    ext.addCommandHandler(handler);
+
+    ext.fireMessage({
+      type: "bar_code/scan",
+      payload: {
+        title: "Scan Matter QR",
+        description: "Point the camera at the device's Matter QR code.",
+        alternative_option_label: "Enter code manually",
+      },
+    });
+  }
+
+  _closeNativeScan() {
+    const ext = this._external();
+    if (ext) ext.fireMessage({ type: "bar_code/close" });
+    this._restoreCmdHandler();
+  }
+
+  _restoreCmdHandler() {
+    const ext = this._external();
+    if (ext && this._prevCmdHandler !== undefined) {
+      ext.addCommandHandler(this._prevCmdHandler);
+    }
+    this._prevCmdHandler = undefined;
   }
 
   // ---- camera scanning -----------------------------------------------------
@@ -512,6 +606,8 @@ class MatterEnrollerPanel extends HTMLElement {
     this._$("result-code").textContent = "—";
     this._$("result-fields").innerHTML = "";
     this._$("status").textContent = "";
+    const cancelBtn = this._$("cancel-btn");
+    if (cancelBtn) cancelBtn.classList.add("hidden");
     const ds = this._$("device-setup");
     if (ds) ds.classList.add("hidden");
     const input = this._$("manual-input");
@@ -524,7 +620,10 @@ class MatterEnrollerPanel extends HTMLElement {
     if (!this._parsed || !this._hass) return;
     const status = this._$("status");
     const btn = this._$("commission-btn");
+    const cancelBtn = this._$("cancel-btn");
     btn.disabled = true;
+    cancelBtn.classList.remove("hidden");
+    this._commissionCancelled = false;
     status.className = "status";
     status.textContent = "⏳ Commissioning… watch the logs below. This can take up to a minute.";
 
@@ -539,15 +638,33 @@ class MatterEnrollerPanel extends HTMLElement {
         // device that is not yet on the network.
         network_only: false,
       });
+      if (this._commissionCancelled) return;
       status.className = "status ok";
       status.textContent = "✅ Device commissioned successfully.";
       this._presentNewDevice(before);
     } catch (err) {
+      if (this._commissionCancelled) return;
       status.className = "status err";
       const msg = err && (err.message || err.code) ? err.message || err.code : err;
       status.textContent = `❌ Commissioning failed: ${msg}`;
       btn.disabled = false;
+    } finally {
+      if (!this._commissionCancelled) cancelBtn.classList.add("hidden");
     }
+  }
+
+  // Matter Server exposes no abort API, so this only stops the UI from waiting
+  // — the server finishes or times out on its own.
+  _cancelCommission() {
+    this._commissionCancelled = true;
+    const status = this._$("status");
+    status.className = "status";
+    status.textContent =
+      "Stopped waiting. Note: Matter Server has no abort API, so an in-flight " +
+      "commission keeps running on the server until it finishes or times out " +
+      "(~1–2 min). If the device paired anyway, it'll show under the Matter integration.";
+    this._$("commission-btn").disabled = false;
+    this._$("cancel-btn").classList.add("hidden");
   }
 
   // ---- post-enrollment device setup ---------------------------------------

@@ -17,9 +17,12 @@ but packaged as a one-click, HACS-installable integration.
 - 📷 **Camera QR scanning** — live scanning via the native `BarcodeDetector` API
   where available, with a bundled [`jsQR`](https://github.com/cozmo/jsQR)
   fallback.
-- 📸 **Photo scanning (mobile app / HTTP)** — a "Scan QR from photo" option that
-  opens the phone's native camera (or a file picker on desktop) and decodes the
-  still image. Works even over plain HTTP where live camera is blocked.
+- 📱 **Native scanner in the HA mobile app** — inside the Home Assistant
+  companion app, the Enroll button uses the app's own built-in barcode scanner
+  (real camera, works over HTTP) via the external bus.
+- 📸 **Photo scanning (browser / HTTP)** — a "Scan QR from photo" option that
+  opens the native camera (or a file picker on desktop) and decodes the still
+  image. Works even over plain HTTP where live camera is blocked.
 - ⌨️ **Manual entry** — paste the full `MT:…` QR string or the 11 / 21-digit
   manual pairing code.
 - 🔎 **Decodes the payload** — shows Vendor ID, Product ID, discriminator,
@@ -27,9 +30,13 @@ but packaged as a one-click, HACS-installable integration.
   code), matching the Matter onboarding spec.
 - 🚀 **One-click commissioning** — calls Home Assistant's built-in
   `matter/commission` websocket command with `network_only: false` so a fresh
-  Thread/Wi-Fi device can be commissioned over BLE.
-- 📜 **Live log stream** — tails the `matter_server` and `chip` loggers in real
-  time so you can watch the device commission.
+  Thread/Wi-Fi device can be commissioned over BLE. Includes a **✋ Cancel**
+  button to stop waiting on a stuck pair (see the note about Matter's lack of a
+  true abort API).
+- 📜 **Live log stream** — streams the **Matter Server add-on** logs via the
+  Supervisor API (the detailed CHIP/commissioning logs), plus Home Assistant's
+  in-process Matter client logs, so you can watch the device commission in real
+  time.
 - 🏷️ **Post-enrollment setup** — just like ZHA/Zigbee pairing: once the device is
   added, jump straight to it, rename it, assign an **area** (create one inline),
   and set **labels/tags** (create them inline) without leaving the panel.
@@ -43,27 +50,20 @@ but packaged as a one-click, HACS-installable integration.
   dataset, and **Bluetooth** available to Home Assistant (built-in adapter or an
   ESP32 Bluetooth proxy in *active* mode) so the device can be commissioned over
   BLE.
-- **Live camera requires a secure context.** Browsers (and the HA mobile app's
-  WebView) only expose the live camera (`getUserMedia`) over **HTTPS** or
-  **`localhost`**. Over plain `http://` — including the mobile app on your LAN —
-  live scanning is blocked by the browser and there is nothing the integration
-  can do about it. In that case use either:
-  - **📸 Scan QR from photo** — opens your phone's native camera (or a file
-    picker on desktop); the still photo is decoded locally. This works over HTTP
-    and in the mobile app.
-  - **⌨️ Enter pairing code** — type the `MT:` string or manual code.
+- **Scanning by platform:**
+  - **In the Home Assistant mobile app** the Enroll button uses the app's
+    **native barcode scanner** (real camera), so it works fine even over plain
+    HTTP — no HTTPS needed.
+  - **In a browser**, live scanning uses `getUserMedia`, which only works over
+    **HTTPS** or **`localhost`**. Over plain `http://` the browser blocks it —
+    use **📸 Scan QR from photo** (opens the native camera / a file picker; the
+    still image is decoded locally, works over HTTP) or **⌨️ Enter pairing code**.
+    For a live viewfinder in the browser, serve HA over HTTPS (Nabu Casa Cloud or
+    a reverse proxy with a valid certificate).
 
-  For live scanning everywhere, serve HA over HTTPS (Nabu Casa Cloud or a
-  reverse proxy with a valid certificate).
-
-- **Home Assistant Android app + photo scan.** The HA Android app's WebView
-  can't open the camera directly for web file inputs — it always opens the photo
-  gallery ([home-assistant/android#6055](https://github.com/home-assistant/android/issues/6055)),
-  and no web page can override that. So in the app either (a) take a photo of the
-  QR with your Camera app first, then **Scan QR from photo → pick it from the
-  gallery**, or (b) open the panel in **Chrome** on your phone, where the button
-  opens the camera directly (this works over HTTP too). On iOS the app shows a
-  Take Photo / Photo Library sheet as expected.
+  > Note: the older photo-upload path in the HA **Android** app opens the gallery
+  > rather than the camera ([home-assistant/android#6055](https://github.com/home-assistant/android/issues/6055));
+  > that's why the app uses the native scanner instead.
 
 ## Installation
 
@@ -100,7 +100,8 @@ Copy `custom_components/matter_enroller` into your Home Assistant
 | --- | --- |
 | QR decode | `frontend/matter-qr.js` — base38 decode, bit-unpack the TLV header, build the manual pairing code with a Verhoeff check digit (verified against the canonical Matter test vector `MT:Y.K9042C00KA0648G00`). |
 | Commissioning | The panel calls the built-in `matter/commission` websocket command (`code` accepts either the raw `MT:` payload or the manual code). |
-| Log stream | `matter_enroller/subscribe_logs` attaches a log handler to the `matter_server` / `chip` loggers and forwards records over the websocket connection. |
+| Native app scan | In the HA companion app, uses the external bus (`bar_code/scan` / `bar_code/close` and the `bar_code/scan_result` command) exposed via `hass.auth.external`, gated on `config.hasBarCodeScanner`. |
+| Log stream | `matter_enroller/subscribe_logs` follows the **Matter Server add-on** logs via the Supervisor API (`GET http://supervisor/addons/core_matter_server/logs/follow`) and also attaches a handler to the in-process `matter_server` / `chip` client loggers. |
 | Post-enroll setup | Diffs the Matter device list before/after commissioning to find the new device, then uses HA's `config/device_registry/update`, `config/area_registry/{list,create}` and `config/label_registry/{list,create}` websocket commands to rename it and set its area and labels. |
 
 ## Notes & limitations
@@ -109,6 +110,14 @@ Copy `custom_components/matter_enroller` into your Home Assistant
 - If commissioning fails with a credentials error, make sure your Thread dataset
   (OTBR) and/or Wi-Fi credentials are configured; the Matter integration handles
   providing these during commissioning.
+- **Cancel is best-effort.** Matter Server / python-matter-server exposes **no
+  API to abort an in-progress commission**. The ✋ Cancel button only stops the
+  panel from waiting — the server keeps going until it succeeds or times out
+  (~1–2 min). If the device paired anyway, it appears under the Matter integration.
+- **Add-on logs need Supervisor.** The detailed Matter Server logs are streamed
+  from the add-on via the Supervisor API. On Container/Core installs (no
+  Supervisor) only Home Assistant's in-process Matter *client* logs are shown. If
+  your add-on uses a non-standard slug, update `_ADDON_SLUGS` in `websocket_api.py`.
 - Bundled `jsQR` is vendored under `frontend/jsqr.js` (MIT).
 
 ## License

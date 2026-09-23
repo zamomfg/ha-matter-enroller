@@ -2,29 +2,40 @@
 
 The Matter *commissioning* itself is performed with the command that Home
 Assistant's built-in Matter integration already exposes (``matter/commission``),
-so the frontend calls that directly. This module only adds what the built-in
-integration does not provide: a live stream of the Matter Server / CHIP stack
-logs so the user can watch a Thread device being commissioned in real time.
+so the frontend calls that directly. This module adds a live log stream so the
+user can watch a Thread device being commissioned in real time.
+
+The detailed commissioning / CHIP logs live in the **Matter Server add-on**
+(a separate container), not in Home Assistant Core's Python logging. So when
+running under Supervisor we follow the add-on's logs over the Supervisor API and
+forward them to the panel. As a supplement/fallback (e.g. Container or Core
+installs without Supervisor) we also attach a handler to the in-process
+``matter_server`` / ``chip`` client loggers.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN, STREAMED_LOGGERS
 
 _REGISTERED = f"{DOMAIN}_ws_registered"
 
-# Level we drop the streamed loggers to while a client is watching, so
-# commissioning progress reaches our handler. INFO (not DEBUG) avoids flooding
-# the panel with verbose CHIP native chatter.
+# Level we drop the in-process loggers to while a client is watching.
 _STREAM_LEVEL = logging.INFO
+
+# Candidate slugs for the official Matter Server add-on.
+_ADDON_SLUGS = ("core_matter_server", "core_matter")
 
 
 @callback
@@ -36,8 +47,26 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_subscribe_logs)
 
 
+def _log_event(msg_id: int, level: str, name: str, message: str) -> dict[str, Any]:
+    return websocket_api.event_message(
+        msg_id,
+        {"level": level, "name": name, "message": message, "created": 0},
+    )
+
+
+def _guess_level(line: str) -> str:
+    upper = line.upper()
+    if "[ERROR]" in upper or " ERROR " in upper or "CRITICAL" in upper:
+        return "ERROR"
+    if "[WARNING]" in upper or " WARN" in upper:
+        return "WARNING"
+    if "[DEBUG]" in upper or " DEBUG " in upper:
+        return "DEBUG"
+    return "INFO"
+
+
 class _StreamHandler(logging.Handler):
-    """Forward log records to a websocket connection, thread-safe."""
+    """Forward in-process log records to a websocket connection, thread-safe."""
 
     def __init__(
         self,
@@ -54,7 +83,7 @@ class _StreamHandler(logging.Handler):
         # Records may originate from CHIP's native threads, so marshal the send
         # back onto the event loop.
         try:
-            payload: dict[str, Any] = {
+            payload = {
                 "level": record.levelname,
                 "name": record.name,
                 "message": record.getMessage(),
@@ -73,6 +102,55 @@ class _StreamHandler(logging.Handler):
             pass
 
 
+async def _follow_addon_logs(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg_id: int,
+    token: str,
+) -> None:
+    """Follow the Matter Server add-on logs via the Supervisor API."""
+    session = async_get_clientsession(hass)
+    headers = {"Authorization": f"Bearer {token}", "Accept": "text/plain"}
+    # No read timeout: this is a long-lived streaming request.
+    timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=None)
+
+    for slug in _ADDON_SLUGS:
+        url = f"http://supervisor/addons/{slug}/logs/follow"
+        try:
+            async with session.get(
+                url, headers=headers, params={"lines": 30}, timeout=timeout
+            ) as resp:
+                if resp.status != 200:
+                    continue
+                connection.send_message(
+                    _log_event(
+                        msg_id, "INFO", DOMAIN, f"Streaming Matter Server add-on logs ({slug})…"
+                    )
+                )
+                async for raw in resp.content:
+                    line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                    if line:
+                        connection.send_message(
+                            _log_event(msg_id, _guess_level(line), "matter-server", line)
+                        )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - try the next slug / fall through
+            continue
+
+    connection.send_message(
+        _log_event(
+            msg_id,
+            "INFO",
+            DOMAIN,
+            "Could not attach to the Matter Server add-on logs "
+            "(no Supervisor add-on found — Container/Core install?). "
+            "Showing Home Assistant's in-process Matter client logs only.",
+        )
+    )
+
+
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/subscribe_logs"}
 )
@@ -83,36 +161,39 @@ def ws_subscribe_logs(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Stream Matter Server / CHIP log records until the client unsubscribes."""
-    handler = _StreamHandler(hass, connection, msg["id"])
-    handler.setLevel(logging.NOTSET)
+    """Stream Matter Server logs until the client unsubscribes."""
+    msg_id = msg["id"]
 
+    # 1) In-process client loggers (always available).
+    handler = _StreamHandler(hass, connection, msg_id)
+    handler.setLevel(logging.NOTSET)
     restore: list[tuple[logging.Logger, int]] = []
     for name in STREAMED_LOGGERS:
         logger = logging.getLogger(name)
-        # Remember the original level so we can put it back on unsubscribe.
         restore.append((logger, logger.level))
         if logger.level == logging.NOTSET or logger.level > _STREAM_LEVEL:
             logger.setLevel(_STREAM_LEVEL)
         logger.addHandler(handler)
+
+    # 2) Matter Server add-on logs via Supervisor (the detailed ones), if present.
+    task: asyncio.Task | None = None
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if token:
+        task = hass.async_create_background_task(
+            _follow_addon_logs(hass, connection, msg_id, token),
+            name=f"{DOMAIN}_addon_logs_{msg_id}",
+        )
 
     @callback
     def _unsubscribe() -> None:
         for logger, original_level in restore:
             logger.removeHandler(handler)
             logger.setLevel(original_level)
+        if task and not task.done():
+            task.cancel()
 
-    connection.subscriptions[msg["id"]] = _unsubscribe
-    connection.send_result(msg["id"])
-    # Prime the stream so the panel shows immediate feedback.
+    connection.subscriptions[msg_id] = _unsubscribe
+    connection.send_result(msg_id)
     connection.send_message(
-        websocket_api.event_message(
-            msg["id"],
-            {
-                "level": "INFO",
-                "name": DOMAIN,
-                "message": "Streaming Matter Server logs…",
-                "created": 0,
-            },
-        )
+        _log_event(msg_id, "INFO", DOMAIN, "Log stream connected. Waiting for activity…")
     )
