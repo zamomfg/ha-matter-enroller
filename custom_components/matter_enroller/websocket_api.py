@@ -113,14 +113,24 @@ async def _follow_addon_logs(
     headers = {"Authorization": f"Bearer {token}", "Accept": "text/plain"}
     # No read timeout: this is a long-lived streaming request.
     timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=None)
+    # The Supervisor host is provided via env; default to the internal hostname.
+    host = os.environ.get("SUPERVISOR", "supervisor")
 
     for slug in _ADDON_SLUGS:
-        url = f"http://supervisor/addons/{slug}/logs/follow"
+        url = f"http://{host}/addons/{slug}/logs/follow"
         try:
             async with session.get(
                 url, headers=headers, params={"lines": 30}, timeout=timeout
             ) as resp:
                 if resp.status != 200:
+                    connection.send_message(
+                        _log_event(
+                            msg_id,
+                            "DEBUG",
+                            DOMAIN,
+                            f"add-on '{slug}' logs → HTTP {resp.status} (trying next)…",
+                        )
+                    )
                     continue
                 connection.send_message(
                     _log_event(
@@ -136,17 +146,23 @@ async def _follow_addon_logs(
             return
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - try the next slug / fall through
+        except Exception as err:  # noqa: BLE001 - try the next slug / fall through
+            connection.send_message(
+                _log_event(
+                    msg_id, "DEBUG", DOMAIN, f"add-on '{slug}' logs failed: {err} (trying next)…"
+                )
+            )
             continue
 
     connection.send_message(
         _log_event(
             msg_id,
-            "INFO",
+            "WARNING",
             DOMAIN,
             "Could not attach to the Matter Server add-on logs "
-            "(no Supervisor add-on found — Container/Core install?). "
-            "Showing Home Assistant's in-process Matter client logs only.",
+            f"(host '{host}', slugs tried: {', '.join(_ADDON_SLUGS)}). "
+            "Showing Home Assistant's in-process Matter client logs only. "
+            "If your add-on uses a different slug, set it in _ADDON_SLUGS.",
         )
     )
 
@@ -178,11 +194,6 @@ def ws_subscribe_logs(
     # 2) Matter Server add-on logs via Supervisor (the detailed ones), if present.
     task: asyncio.Task | None = None
     token = os.environ.get("SUPERVISOR_TOKEN")
-    if token:
-        task = hass.async_create_background_task(
-            _follow_addon_logs(hass, connection, msg_id, token),
-            name=f"{DOMAIN}_addon_logs_{msg_id}",
-        )
 
     @callback
     def _unsubscribe() -> None:
@@ -195,5 +206,30 @@ def ws_subscribe_logs(
     connection.subscriptions[msg_id] = _unsubscribe
     connection.send_result(msg_id)
     connection.send_message(
-        _log_event(msg_id, "INFO", DOMAIN, "Log stream connected. Waiting for activity…")
+        _log_event(
+            msg_id,
+            "INFO",
+            DOMAIN,
+            f"Log stream connected (in-process loggers: {', '.join(STREAMED_LOGGERS)}).",
+        )
     )
+
+    if token:
+        connection.send_message(
+            _log_event(msg_id, "INFO", DOMAIN, "Supervisor detected — attaching to add-on logs…")
+        )
+        task = hass.async_create_background_task(
+            _follow_addon_logs(hass, connection, msg_id, token),
+            name=f"{DOMAIN}_addon_logs_{msg_id}",
+        )
+    else:
+        connection.send_message(
+            _log_event(
+                msg_id,
+                "WARNING",
+                DOMAIN,
+                "No SUPERVISOR_TOKEN in Home Assistant Core — cannot read the Matter "
+                "Server add-on logs (Container/Core install, or HA not running under "
+                "Supervisor). Showing in-process Matter client logs only.",
+            )
+        )
