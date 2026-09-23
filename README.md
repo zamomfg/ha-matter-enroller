@@ -26,6 +26,9 @@ but packaged as a one-click, HACS-installable integration.
   Thread/Wi-Fi device can be commissioned over BLE.
 - 📜 **Live log stream** — tails the `matter_server` and `chip` loggers in real
   time so you can watch the device commission.
+- 🏷️ **Post-enrollment setup** — just like ZHA/Zigbee pairing: once the device is
+  added, jump straight to it, rename it, assign an **area** (create one inline),
+  and set **labels/tags** (create them inline) without leaving the panel.
 
 ## Requirements
 
@@ -65,8 +68,10 @@ Copy `custom_components/matter_enroller` into your Home Assistant
    code.
 3. Review the decoded setup code and details, then click **Commission Thread
    device**.
-4. Watch the **Matter Server logs** panel while the device commissions. On
-   success the device appears under the Matter integration.
+4. Watch the **Matter Server logs** panel while the device commissions.
+5. When it's done, a **New device** card appears (like Zigbee pairing): click
+   **Open device →** to jump to it, or right there **rename** it, pick/create an
+   **area**, and add/create **labels (tags)**, then **Save**.
 
 ## How it works
 
@@ -75,6 +80,7 @@ Copy `custom_components/matter_enroller` into your Home Assistant
 | QR decode | `frontend/matter-qr.js` — base38 decode, bit-unpack the TLV header, build the manual pairing code with a Verhoeff check digit (verified against the canonical Matter test vector `MT:Y.K9042C00KA0648G00`). |
 | Commissioning | The panel calls the built-in `matter/commission` websocket command (`code` accepts either the raw `MT:` payload or the manual code). |
 | Log stream | `matter_enroller/subscribe_logs` attaches a log handler to the `matter_server` / `chip` loggers and forwards records over the websocket connection. |
+| Post-enroll setup | Diffs the Matter device list before/after commissioning to find the new device, then uses HA's `config/device_registry/update`, `config/area_registry/{list,create}` and `config/label_registry/{list,create}` websocket commands to rename it and set its area and labels. |
 
 ## Notes & limitations
 

@@ -143,6 +143,25 @@ class MatterEnrollerPanel extends HTMLElement {
         .log-ERROR, .log-CRITICAL { color: #ef9a9a; }
         .log-name { color: #7e9cc0; }
         .muted { color: var(--secondary-text-color); font-size: 13px; }
+        label { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--secondary-text-color); }
+        select {
+          font: inherit; padding: 10px; border-radius: 8px;
+          border: 1px solid var(--divider-color, #ccc);
+          background: var(--card-background-color, #fff);
+          color: var(--primary-text-color); max-width: 100%;
+        }
+        .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+        .chip {
+          border: 1px solid var(--divider-color, #ccc); border-radius: 16px;
+          padding: 4px 12px; cursor: pointer; font-size: 13px; user-select: none;
+        }
+        .chip.selected {
+          background: var(--primary-color, #03a9f4);
+          color: var(--text-primary-color, #fff);
+          border-color: var(--primary-color, #03a9f4);
+        }
+        .chip.new { border-style: dashed; }
+        #device-setup strong { font-size: 16px; }
       </style>
 
       <h1>Enroll Matter / Thread Device</h1>
@@ -181,6 +200,11 @@ class MatterEnrollerPanel extends HTMLElement {
           </div>
           <div class="status" id="status"></div>
         </div>
+      </div>
+
+      <div class="card hidden" id="device-setup">
+        <strong>✅ New device</strong>
+        <div id="device-setup-body"></div>
       </div>
 
       <div class="card">
@@ -406,6 +430,8 @@ class MatterEnrollerPanel extends HTMLElement {
     this._$("result-code").textContent = "—";
     this._$("result-fields").innerHTML = "";
     this._$("status").textContent = "";
+    const ds = this._$("device-setup");
+    if (ds) ds.classList.add("hidden");
     const input = this._$("manual-input");
     if (input) input.value = "";
   }
@@ -420,6 +446,9 @@ class MatterEnrollerPanel extends HTMLElement {
     status.className = "status";
     status.textContent = "⏳ Commissioning… watch the logs below. This can take up to a minute.";
 
+    // Snapshot existing Matter devices so we can spot the newly added one.
+    const before = await this._matterDeviceIds();
+
     try {
       await this._hass.connection.sendMessagePromise({
         type: "matter/commission",
@@ -430,12 +459,237 @@ class MatterEnrollerPanel extends HTMLElement {
       });
       status.className = "status ok";
       status.textContent = "✅ Device commissioned successfully.";
+      this._presentNewDevice(before);
     } catch (err) {
       status.className = "status err";
       const msg = err && (err.message || err.code) ? err.message || err.code : err;
       status.textContent = `❌ Commissioning failed: ${msg}`;
       btn.disabled = false;
     }
+  }
+
+  // ---- post-enrollment device setup ---------------------------------------
+
+  _ws(msg) {
+    return this._hass.connection.sendMessagePromise(msg);
+  }
+
+  _sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async _matterDeviceIds() {
+    try {
+      const devices = await this._ws({ type: "config/device_registry/list" });
+      return new Set(
+        devices
+          .filter((d) => this._isMatterDevice(d))
+          .map((d) => d.id)
+      );
+    } catch (_) {
+      return new Set();
+    }
+  }
+
+  _isMatterDevice(device) {
+    return (device.identifiers || []).some(
+      (i) => Array.isArray(i) && i[0] === "matter"
+    );
+  }
+
+  // Poll the device registry until a Matter device appears that wasn't there
+  // before commissioning, then show the setup card for it.
+  async _presentNewDevice(before) {
+    let device = null;
+    for (let attempt = 0; attempt < 12 && !device; attempt += 1) {
+      const devices = await this._ws({
+        type: "config/device_registry/list",
+      }).catch(() => []);
+      device =
+        devices.find((d) => this._isMatterDevice(d) && !before.has(d.id)) ||
+        null;
+      if (!device) await this._sleep(1500);
+    }
+
+    const card = this._$("device-setup");
+    const body = this._$("device-setup-body");
+    card.classList.remove("hidden");
+    body.innerHTML = "";
+
+    if (!device) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent =
+        "Device commissioned, but it hasn't shown up in the device list yet. ";
+      const a = document.createElement("a");
+      a.textContent = "Open the Matter integration →";
+      a.href = "/config/integrations/integration/matter";
+      p.appendChild(a);
+      body.appendChild(p);
+      return;
+    }
+
+    this._newDevice = device;
+    await this._renderDeviceSetup(device, body);
+  }
+
+  _openDevice(deviceId) {
+    const url = `/config/devices/device/${deviceId}`;
+    window.history.pushState(null, "", url);
+    // Home Assistant's root element listens for this on window and routes
+    // without a full page reload.
+    window.dispatchEvent(new CustomEvent("location-changed"));
+  }
+
+  _fieldLabel(text) {
+    const el = document.createElement("label");
+    el.textContent = text;
+    return el;
+  }
+
+  async _renderDeviceSetup(device, body) {
+    const [areas, labels] = await Promise.all([
+      this._ws({ type: "config/area_registry/list" }).catch(() => []),
+      this._ws({ type: "config/label_registry/list" }).catch(() => []),
+    ]);
+
+    const currentName = device.name_by_user || device.name || "Matter device";
+
+    // Heading + "open device" button.
+    const head = document.createElement("div");
+    head.className = "row";
+    head.style.justifyContent = "space-between";
+    const title = document.createElement("div");
+    title.append(document.createTextNode("Added "));
+    const strong = document.createElement("strong");
+    strong.textContent = currentName;
+    title.append(strong);
+    const openBtn = document.createElement("button");
+    openBtn.textContent = "Open device →";
+    openBtn.addEventListener("click", () => this._openDevice(device.id));
+    head.append(title, openBtn);
+    body.append(head);
+
+    // Name.
+    body.append(this._fieldLabel("Name"));
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.value = device.name_by_user || device.name || "";
+    nameInput.style.width = "100%";
+    body.append(nameInput);
+
+    // Area (existing dropdown + inline create).
+    body.append(this._fieldLabel("Area"));
+    const areaRow = document.createElement("div");
+    areaRow.className = "row";
+    const areaSelect = document.createElement("select");
+    const noneOpt = document.createElement("option");
+    noneOpt.value = "";
+    noneOpt.textContent = "— No area —";
+    areaSelect.append(noneOpt);
+    for (const a of areas) {
+      const o = document.createElement("option");
+      o.value = a.area_id;
+      o.textContent = a.name;
+      if (device.area_id === a.area_id) o.selected = true;
+      areaSelect.append(o);
+    }
+    const newAreaInput = document.createElement("input");
+    newAreaInput.type = "text";
+    newAreaInput.placeholder = "or new area name";
+    areaRow.append(areaSelect, newAreaInput);
+    body.append(areaRow);
+
+    // Labels / tags (existing chips toggle + inline create).
+    body.append(this._fieldLabel("Labels / tags"));
+    const chips = document.createElement("div");
+    chips.className = "chips";
+    const selected = new Set(device.labels || []);
+    for (const l of labels) {
+      const chip = document.createElement("span");
+      chip.className = "chip" + (selected.has(l.label_id) ? " selected" : "");
+      chip.textContent = l.name;
+      chip.addEventListener("click", () => {
+        if (selected.has(l.label_id)) {
+          selected.delete(l.label_id);
+          chip.classList.remove("selected");
+        } else {
+          selected.add(l.label_id);
+          chip.classList.add("selected");
+        }
+      });
+      chips.append(chip);
+    }
+    body.append(chips);
+    const newLabelInput = document.createElement("input");
+    newLabelInput.type = "text";
+    newLabelInput.placeholder = "add new label, press Enter";
+    const pendingLabels = [];
+    newLabelInput.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const name = newLabelInput.value.trim();
+      if (!name || pendingLabels.includes(name)) return;
+      pendingLabels.push(name);
+      const chip = document.createElement("span");
+      chip.className = "chip selected new";
+      chip.textContent = name;
+      chips.append(chip);
+      newLabelInput.value = "";
+    });
+    body.append(newLabelInput);
+
+    // Save.
+    const saveRow = document.createElement("div");
+    saveRow.className = "row";
+    saveRow.style.marginTop = "14px";
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "💾 Save";
+    const devStatus = document.createElement("span");
+    devStatus.className = "status";
+    saveRow.append(saveBtn, devStatus);
+    body.append(saveRow);
+
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      devStatus.className = "status";
+      devStatus.textContent = "Saving…";
+      try {
+        let areaId = areaSelect.value || null;
+        const newAreaName = newAreaInput.value.trim();
+        if (newAreaName) {
+          const area = await this._ws({
+            type: "config/area_registry/create",
+            name: newAreaName,
+          });
+          areaId = area.area_id;
+        }
+
+        const labelIds = new Set(selected);
+        for (const name of pendingLabels) {
+          const lbl = await this._ws({
+            type: "config/label_registry/create",
+            name,
+          });
+          labelIds.add(lbl.label_id);
+        }
+
+        await this._ws({
+          type: "config/device_registry/update",
+          device_id: device.id,
+          name_by_user: nameInput.value.trim() || null,
+          area_id: areaId,
+          labels: Array.from(labelIds),
+        });
+
+        devStatus.className = "status ok";
+        devStatus.textContent = "✅ Saved";
+      } catch (err) {
+        devStatus.className = "status err";
+        devStatus.textContent = `❌ ${err.message || err.code || err}`;
+        saveBtn.disabled = false;
+      }
+    });
   }
 
   // ---- log streaming -------------------------------------------------------
