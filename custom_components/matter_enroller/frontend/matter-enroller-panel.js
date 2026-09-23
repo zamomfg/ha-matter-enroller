@@ -174,7 +174,8 @@ class MatterEnrollerPanel extends HTMLElement {
           <button class="secondary" id="manual-btn">⌨️ Enter pairing code</button>
         </div>
         <input type="file" id="photo-input" accept="image/*" capture="environment" class="hidden" />
-        <p class="muted" id="photo-hint" style="margin-top:8px;">On the mobile app or over HTTP, live camera is blocked by the browser — use <strong>Scan QR from photo</strong> (opens your phone camera) or type the code.</p>
+        <p class="muted" id="photo-hint" style="margin-top:8px;">Over HTTP (incl. the mobile app), live camera is blocked by the browser — use <strong>📸 Scan QR from photo</strong> or type the code.<br />
+        <strong>Home Assistant Android app:</strong> it can only open the photo gallery, not the camera (app limitation). Snap the QR with your Camera app first, then pick it — or open this page in <strong>Chrome</strong>, where the button opens the camera directly (works over HTTP too).</p>
 
         <div id="scanner" class="hidden" style="margin-top:12px;">
           <video id="video" playsinline muted></video>

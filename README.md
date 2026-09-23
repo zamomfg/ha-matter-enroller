@@ -56,6 +56,15 @@ but packaged as a one-click, HACS-installable integration.
   For live scanning everywhere, serve HA over HTTPS (Nabu Casa Cloud or a
   reverse proxy with a valid certificate).
 
+- **Home Assistant Android app + photo scan.** The HA Android app's WebView
+  can't open the camera directly for web file inputs — it always opens the photo
+  gallery ([home-assistant/android#6055](https://github.com/home-assistant/android/issues/6055)),
+  and no web page can override that. So in the app either (a) take a photo of the
+  QR with your Camera app first, then **Scan QR from photo → pick it from the
+  gallery**, or (b) open the panel in **Chrome** on your phone, where the button
+  opens the camera directly (this works over HTTP too). On iOS the app shows a
+  Take Photo / Photo Library sheet as expected.
+
 ## Installation
 
 ### Via HACS (recommended)
