@@ -118,6 +118,9 @@ Copy `custom_components/matter_enroller` into your Home Assistant
   from the add-on via the Supervisor API. On Container/Core installs (no
   Supervisor) only Home Assistant's in-process Matter *client* logs are shown. If
   your add-on uses a non-standard slug, update `_ADDON_SLUGS` in `websocket_api.py`.
+- **Troubleshooting the scanner:** open the panel's top-right **⋮ menu →
+  🐞 Diagnostics** to see the detected environment (native scanner availability,
+  secure context, `getUserMedia`/`BarcodeDetector` support, etc.).
 - Bundled `jsQR` is vendored under `frontend/jsqr.js` (MIT).
 
 ## License

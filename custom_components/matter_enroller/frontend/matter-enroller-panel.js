@@ -81,12 +81,39 @@ class MatterEnrollerPanel extends HTMLElement {
       <style>
         :host {
           display: block;
-          padding: 16px;
-          max-width: 880px;
-          margin: 0 auto;
           color: var(--primary-text-color);
           font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
         }
+        .content { padding: 16px; max-width: 880px; margin: 0 auto; }
+        .toolbar {
+          display: flex; align-items: center; height: 56px; gap: 8px;
+          padding: 0 8px;
+          background: var(--app-header-background-color, var(--primary-color, #03a9f4));
+          color: var(--app-header-text-color, #fff);
+          font-size: 20px; font-weight: 400;
+        }
+        .toolbar .title { flex: 1; margin: 0 8px; }
+        .icon-btn {
+          background: none; border: none; color: inherit; cursor: pointer;
+          width: 40px; height: 40px; border-radius: 50%; padding: 8px;
+          display: inline-flex; align-items: center; justify-content: center;
+        }
+        .icon-btn:hover { background: rgba(255, 255, 255, 0.15); }
+        .icon-btn svg { width: 24px; height: 24px; fill: currentColor; }
+        .menu-wrap { position: relative; }
+        .menu {
+          position: absolute; right: 4px; top: 46px; z-index: 10;
+          background: var(--card-background-color, #fff);
+          color: var(--primary-text-color);
+          border-radius: 8px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+          min-width: 180px; padding: 4px 0; overflow: hidden;
+        }
+        .menu-item {
+          display: block; width: 100%; text-align: left; background: none;
+          border: none; color: inherit; font: inherit; padding: 12px 16px;
+          cursor: pointer;
+        }
+        .menu-item:hover { background: var(--secondary-background-color, rgba(0, 0, 0, 0.06)); }
         h1 { font-size: 22px; font-weight: 500; margin: 8px 0 4px; }
         .subtitle { color: var(--secondary-text-color); margin: 0 0 16px; font-size: 14px; }
         .card {
@@ -164,8 +191,30 @@ class MatterEnrollerPanel extends HTMLElement {
         }
         .chip.new { border-style: dashed; }
         #device-setup strong { font-size: 16px; }
+        pre#diag {
+          background: #0b0f14; color: #cfd8dc; border-radius: 8px; padding: 10px;
+          font-size: 11px; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+          margin-top: 8px;
+        }
       </style>
 
+      <div class="toolbar">
+        <button class="icon-btn" id="hamburger" title="Menu" aria-label="Open sidebar">
+          <svg viewBox="0 0 24 24"><path d="M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z" /></svg>
+        </button>
+        <span class="title">Matter Enroller</span>
+        <div class="menu-wrap">
+          <button class="icon-btn" id="menu-btn" title="More" aria-label="More options" aria-haspopup="true">
+            <svg viewBox="0 0 24 24"><path d="M12,16A2,2 0 0,1 14,18A2,2 0 0,1 12,20A2,2 0 0,1 10,18A2,2 0 0,1 12,16M12,10A2,2 0 0,1 14,12A2,2 0 0,1 12,14A2,2 0 0,1 10,12A2,2 0 0,1 12,10M12,4A2,2 0 0,1 14,6A2,2 0 0,1 12,8A2,2 0 0,1 10,6A2,2 0 0,1 12,4Z" /></svg>
+          </button>
+          <div class="menu hidden" id="menu" role="menu">
+            <button class="menu-item" id="menu-diag" role="menuitem">🐞 Diagnostics</button>
+            <button class="menu-item" id="menu-clear-logs" role="menuitem">🧹 Clear logs</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="content">
       <h1>Enroll Matter / Thread Device</h1>
       <p class="subtitle">Scan the device's Matter QR code with your camera, or type the pairing code — no phone required.</p>
 
@@ -175,6 +224,7 @@ class MatterEnrollerPanel extends HTMLElement {
           <button class="secondary" id="photo-btn">📸 Scan QR from photo</button>
           <button class="secondary" id="manual-btn">⌨️ Enter pairing code</button>
         </div>
+        <pre id="diag" class="hidden"></pre>
         <input type="file" id="photo-input" accept="image/*" capture="environment" class="hidden" />
         <p class="muted" id="photo-hint" style="margin-top:8px;">In the <strong>Home Assistant mobile app</strong>, <strong>Enroll Thread Device</strong> opens the app's built-in camera scanner. In a browser it uses the live camera (needs HTTPS/localhost) — otherwise use <strong>📸 Scan QR from photo</strong> or type the code.</p>
 
@@ -220,6 +270,7 @@ class MatterEnrollerPanel extends HTMLElement {
         </div>
         <div class="logs" id="logs"></div>
       </div>
+      </div>
     `;
 
     this._$ = (id) => this.shadowRoot.getElementById(id);
@@ -232,6 +283,38 @@ class MatterEnrollerPanel extends HTMLElement {
       this._scanFromPhoto(file);
     });
     this._$("manual-btn").addEventListener("click", () => this._toggleManual());
+
+    // Toolbar: hamburger toggles the HA sidebar; three-dot overflow menu.
+    this._$("hamburger").addEventListener("click", () => {
+      this.dispatchEvent(
+        new CustomEvent("hass-toggle-menu", { bubbles: true, composed: true })
+      );
+    });
+    const menu = this._$("menu");
+    this._$("menu-btn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      menu.classList.toggle("hidden");
+    });
+    this._$("menu-diag").addEventListener("click", () => {
+      menu.classList.add("hidden");
+      this._toggleDiag();
+    });
+    this._$("menu-clear-logs").addEventListener("click", () => {
+      menu.classList.add("hidden");
+      this._logLines = [];
+      this._$("logs").textContent = "";
+    });
+    // Close the overflow menu on any outside click.
+    this.shadowRoot.addEventListener("click", (e) => {
+      const path = e.composedPath();
+      if (
+        !menu.classList.contains("hidden") &&
+        !path.includes(menu) &&
+        !path.includes(this._$("menu-btn"))
+      ) {
+        menu.classList.add("hidden");
+      }
+    });
     this._$("manual-submit").addEventListener("click", () =>
       this._handleManual()
     );
@@ -263,6 +346,32 @@ class MatterEnrollerPanel extends HTMLElement {
     } else {
       this._startScanner();
     }
+  }
+
+  _toggleDiag() {
+    const el = this._$("diag");
+    if (!el.classList.contains("hidden")) {
+      el.classList.add("hidden");
+      return;
+    }
+    const ext = this._external();
+    const info = {
+      userAgent: navigator.userAgent,
+      origin: location.origin,
+      isSecureContext: window.isSecureContext,
+      hasGetUserMedia: !!(
+        navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+      ),
+      hasBarcodeDetector: "BarcodeDetector" in window,
+      hassAuthExternalPresent: !!ext,
+      externalConfigPresent: !!(ext && ext.config),
+      hasBarCodeScanner: ext && ext.config ? ext.config.hasBarCodeScanner : "(n/a)",
+      commandHandlerPresent: !!(ext && ext._commandHandler),
+      externalConfigKeys: ext && ext.config ? Object.keys(ext.config) : "(n/a)",
+      willUseNativeScanner: this._hasNativeScanner(),
+    };
+    el.textContent = JSON.stringify(info, null, 2);
+    el.classList.remove("hidden");
   }
 
   // ---- native scanner (Home Assistant mobile app) --------------------------
